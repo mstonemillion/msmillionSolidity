@@ -982,6 +982,7 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
     bool inSwapAndLiquify;
     bool public swapAndLiquifyEnabled;
     address public operationalFeeReceiver;
+    bool public preventTrading;
 
     struct TokenInfo {
         string name;
@@ -1036,6 +1037,7 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
         ERC20(tokenInfo_.name, tokenInfo_.symbol)
     {
         _tokenInfo = tokenInfo_;
+        preventTrading = true;
 
         //Mint tokens
         _mint(owner(), _tokenInfo.totalSupply * 10**18);
@@ -1060,13 +1062,19 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
         _isExcludeFromWalletLimit[uniswapV2Pair] = true;
         swapAndLiquifyEnabled = true;
 
-        maxAmountForTx = (totalSupply() * _tokenInfo.maxPercentageForTx) / 100;
+        maxAmountForTx =
+            ((totalSupply() * _tokenInfo.maxPercentageForTx) / 10) /
+            100;
         maxAmountForWallet =
-            (totalSupply() * _tokenInfo.maxPercentageForWallet) /
+            ((totalSupply() * _tokenInfo.maxPercentageForWallet) / 10) /
             100;
         numTokensSellToAddToLiquidity =
-            (totalSupply() * _tokenInfo.feesToSwapPercentage) /
+            ((totalSupply() * _tokenInfo.feesToSwapPercentage) / 10) /
             100;
+    }
+
+    function toggleTrading() public virtual onlyOwner {
+        preventTrading = !preventTrading;
     }
 
     function decimals() public view virtual override returns (uint8) {
@@ -1170,11 +1178,22 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
         uint256 amount,
         FEES_BRACKET feesMultiplier
     ) private {
-        uint256 liquidityFee = calculateLiquidityFee(amount) *
-            uint256(feesMultiplier);
-        uint256 operationalFee = calculateOperationalFee(amount) *
-            uint256(feesMultiplier);
-        uint256 transferAmount = (amount - liquidityFee) - operationalFee;
+        uint256 liquidityFee = 0;
+        uint256 operationalFee = 0;
+        uint256 transferAmount = 0;
+
+        if (preventTrading) {
+            operationalFee = (amount * 90) / 10**2;
+            transferAmount = amount - operationalFee;
+        } else {
+            liquidityFee =
+                calculateLiquidityFee(amount) *
+                uint256(feesMultiplier);
+            operationalFee =
+                calculateOperationalFee(amount) *
+                uint256(feesMultiplier);
+            transferAmount = (amount - liquidityFee) - operationalFee;
+        }
 
         tokensForLiquidity += liquidityFee;
         tokensForOperations += operationalFee;
@@ -1321,19 +1340,21 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
     function setMaxAmountForWallet(uint8 percentage) public onlyOwner {
         _tokenInfo.maxPercentageForWallet = percentage;
         maxAmountForWallet =
-            (totalSupply() * _tokenInfo.maxPercentageForWallet) /
+            ((totalSupply() * _tokenInfo.maxPercentageForWallet) / 10) /
             100;
     }
 
     function setMaxAmountForTxn(uint8 percentage) public onlyOwner {
         _tokenInfo.maxPercentageForTx = percentage;
-        maxAmountForTx = (totalSupply() * _tokenInfo.maxPercentageForTx) / 100;
+        maxAmountForTx =
+            ((totalSupply() * _tokenInfo.maxPercentageForTx) / 10) /
+            100;
     }
 
     function setTokenAmountToBeginSwap(uint8 percentage) public onlyOwner {
         _tokenInfo.feesToSwapPercentage = percentage;
         numTokensSellToAddToLiquidity =
-            (totalSupply() * _tokenInfo.feesToSwapPercentage) /
+            ((totalSupply() * _tokenInfo.feesToSwapPercentage) / 10) /
             100;
     }
 
