@@ -634,7 +634,7 @@ abstract contract ERC20Burnable is Context, ERC20 {
 
 // contracts/MSMILLION.sol
 
-pragma solidity ^0.8.17;
+pragma solidity 0.8.17;
 
 
 
@@ -979,10 +979,9 @@ interface IUniswapV2Router02 is IUniswapV2Router01 {
 }
 
 contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
-    bool inSwapAndLiquify;
+    bool private inSwapAndLiquify;
     bool public swapAndLiquifyEnabled;
     address public operationalFeeReceiver;
-    bool public preventTrading;
 
     struct TokenInfo {
         string name;
@@ -1004,8 +1003,8 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
     mapping(address => bool) private _isExcludeFromTxLimit;
     mapping(address => bool) private _isExcludeFromWalletLimit;
 
-    uint256 tokensForOperations;
-    uint256 tokensForLiquidity;
+    uint256 private tokensForOperations;
+    uint256 private tokensForLiquidity;
 
     uint256 public maxAmountForWallet;
     uint256 public maxAmountForTx;
@@ -1026,7 +1025,12 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
 
     event TransferFee(uint256 operationsTax, uint256 indexed lpTax);
     event OperationsWalletUpdated(address newWallet, address oldWallet);
-    event DevWalletUpdated(address newWallet, address oldWallet);
+    event MaxTokensForWalletUpdated(uint256 maxWalletTokens);
+    event MaxTokensForTransactionUpdated(uint256 maxTxnTokens);
+    event TokensToBeginSwapUpdated(uint256 maxSwapTokens);
+    event BuySellTaxUpdated(uint8 buyTax, uint8 sellTax);
+    event WalletExcludedFromLimit(address wallet);
+    event WalletIncludedInLimit(address wallet);
 
     // Create a uniswap pair for this new token
     address public uniswapV2Pair;
@@ -1037,7 +1041,15 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
         ERC20(tokenInfo_.name, tokenInfo_.symbol)
     {
         _tokenInfo = tokenInfo_;
-        preventTrading = true;
+        require(
+            (_tokenInfo.liquidityFeeRate + _tokenInfo.operationalFeeRate) <= 5,
+            "Tax cannot be more than 5%"
+        );
+
+        //Consider the denominator of 10 used to support fraction of percentage. Enter 10 if expect 1%
+        require(_tokenInfo.maxPercentageForWallet <= 100 && _tokenInfo.maxPercentageForWallet >= 10, "Max wallet - Keep 1% to 10%");
+        require(_tokenInfo.maxPercentageForTx <= 1000 && _tokenInfo.maxPercentageForTx >= 1, "Max txn - Keep 0.1% to 100%");
+        require(_tokenInfo.feesToSwapPercentage <= 100 && _tokenInfo.feesToSwapPercentage >= 1, "Token for swap - Keep 0.1% to 10%");
 
         //Mint tokens
         _mint(owner(), _tokenInfo.totalSupply * 10**18);
@@ -1063,18 +1075,14 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
         swapAndLiquifyEnabled = true;
 
         maxAmountForTx =
-            ((totalSupply() * _tokenInfo.maxPercentageForTx) / 10) /
-            100;
+            (totalSupply() * _tokenInfo.maxPercentageForTx) /
+            1000;
         maxAmountForWallet =
-            ((totalSupply() * _tokenInfo.maxPercentageForWallet) / 10) /
-            100;
+            (totalSupply() * _tokenInfo.maxPercentageForWallet) /
+            1000;
         numTokensSellToAddToLiquidity =
-            ((totalSupply() * _tokenInfo.feesToSwapPercentage) / 10) /
-            100;
-    }
-
-    function toggleTrading() public virtual onlyOwner {
-        preventTrading = !preventTrading;
+            (totalSupply() * _tokenInfo.feesToSwapPercentage) /
+            1000;
     }
 
     function decimals() public view virtual override returns (uint8) {
@@ -1104,7 +1112,7 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
     }
 
     function currentFeesStructure()
-        public
+        external
         view
         virtual
         returns (uint256, uint256)
@@ -1113,12 +1121,18 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
     }
 
     function changeFeesStructure(uint8 liquidityFee, uint8 operationalFee)
-        public
+        external
         virtual
         onlyOwner
     {
+        uint8 buyTax = liquidityFee + operationalFee;
+        require(
+            (buyTax) <= 5,
+            "Tax cannot be more than 5%"
+        );
         _tokenInfo.liquidityFeeRate = liquidityFee;
         _tokenInfo.operationalFeeRate = operationalFee;
+        emit BuySellTaxUpdated(buyTax, buyTax * 2);
     }
 
     function _transfer(
@@ -1131,6 +1145,11 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
         require(amount > 0, "Amount less than zero");
         uint256 fromBalance = balanceOf(from);
         require(fromBalance >= amount, "Amount exceeds balance");
+
+        if (amount == 0) {
+			super._transfer(from, to, 0);
+			return;
+		}
 
         // is the token balance of this contract address over the min number of
         // tokens that we need to initiate a swap + liquidity lock?
@@ -1178,22 +1197,11 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
         uint256 amount,
         FEES_BRACKET feesMultiplier
     ) private {
-        uint256 liquidityFee = 0;
-        uint256 operationalFee = 0;
-        uint256 transferAmount = 0;
-
-        if (preventTrading) {
-            operationalFee = (amount * 90) / 10**2;
-            transferAmount = amount - operationalFee;
-        } else {
-            liquidityFee =
-                calculateLiquidityFee(amount) *
-                uint256(feesMultiplier);
-            operationalFee =
-                calculateOperationalFee(amount) *
-                uint256(feesMultiplier);
-            transferAmount = (amount - liquidityFee) - operationalFee;
-        }
+        uint256 liquidityFee = calculateLiquidityFee(amount) *
+            uint256(feesMultiplier);
+        uint256 operationalFee = calculateOperationalFee(amount) *
+            uint256(feesMultiplier);
+        uint256 transferAmount = (amount - liquidityFee) - operationalFee;
 
         tokensForLiquidity += liquidityFee;
         tokensForOperations += operationalFee;
@@ -1219,7 +1227,7 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
 
     function swapAndLiquify(uint256 contractTokenBalance) private lockTheSwap {
         uint256 totalFees = contractTokenBalance;
-
+        require(totalFees > 0, "Amount cannot be 0");
         //Separate the liquidity
         uint256 halfLpFee = tokensForLiquidity / 2;
         totalFees -= halfLpFee;
@@ -1279,52 +1287,81 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
         );
     }
 
-    function isExcludedFromFee(address account) public view returns (bool) {
+    function isExcludedFromFee(address account)
+        external
+        view
+        returns (bool)
+    {
         return _isExcludedFromFee[account];
     }
 
-    function excludeFromFee(address account) public onlyOwner {
+    function excludeFromFee(address account) external onlyOwner {
+        require(account != address(0), "Provided zero address");
         _isExcludedFromFee[account] = true;
+        emit WalletExcludedFromLimit(account);
     }
 
-    function includeInFee(address account) public onlyOwner {
+    function includeInFee(address account) external onlyOwner {
+        require(account != address(0), "Provided zero address");
         _isExcludedFromFee[account] = false;
+        emit WalletIncludedInLimit(account);
     }
 
-    function isExcludeFromTxLimit(address account) public view returns (bool) {
+    function isExcludeFromTxLimit(address account)
+        external
+        view
+        returns (bool)
+    {
         return _isExcludeFromTxLimit[account];
     }
 
-    function excludeFromTxLimit(address account) public onlyOwner {
+    function excludeFromTxLimit(address account) external onlyOwner {
+        require(account != address(0), "Provided zero address");
         _isExcludeFromTxLimit[account] = true;
+        emit WalletExcludedFromLimit(account);
     }
 
-    function includeInTxLimit(address account) public onlyOwner {
+    function includeInTxLimit(address account) external onlyOwner {
+        require(account != address(0), "Provided zero address");
         _isExcludeFromTxLimit[account] = false;
+        emit WalletIncludedInLimit(account);
     }
 
     function isExcludeFromWalletLimit(address account)
-        public
+        external
         view
         returns (bool)
     {
         return _isExcludeFromWalletLimit[account];
     }
 
-    function excludeFromWalletLimit(address account) public onlyOwner {
+    function excludeFromWalletLimit(address account)
+        external
+        onlyOwner
+    {
+        require(account != address(0), "Provided zero address");
         _isExcludeFromWalletLimit[account] = true;
+        emit WalletExcludedFromLimit(account);
     }
 
-    function includeInWalletLimit(address account) public onlyOwner {
+    function includeInWalletLimit(address account) external onlyOwner {
         _isExcludeFromWalletLimit[account] = false;
+        emit WalletIncludedInLimit(account);
     }
 
-    function setSwapAndLiquifyEnabled(bool _enabled) public onlyOwner {
+    function setSwapAndLiquifyEnabled(bool _enabled)
+        external
+        onlyOwner
+    {
         swapAndLiquifyEnabled = _enabled;
         emit SwapAndLiquifyEnabledUpdated(_enabled);
     }
 
-    function updateOperationsWallet(address newWallet) external onlyOwner {
+    function updateOperationsWallet(address newWallet)
+        external
+        onlyOwner
+    {
+        require(newWallet != address(0), "Assignment to zero address");
         address oldWallet = operationalFeeReceiver;
         operationalFeeReceiver = newWallet;
         walletExclusions(newWallet);
@@ -1332,30 +1369,45 @@ contract MilestoneMillions is ERC20, ERC20Burnable, Ownable {
     }
 
     function walletExclusions(address walletAddress) private {
-        excludeFromTxLimit(walletAddress);
-        excludeFromWalletLimit(walletAddress);
-        excludeFromFee(walletAddress);
+        _isExcludeFromTxLimit[walletAddress] = true;
+        _isExcludeFromWalletLimit[walletAddress] = true;
+        _isExcludedFromFee[walletAddress] = true;
     }
 
-    function setMaxAmountForWallet(uint8 percentage) public onlyOwner {
+    // Percentage of tokens allowed for one wallet max = 10, min = 1 
+    function setMaxAmountForWallet(uint8 percentage)
+        external
+        onlyOwner
+    {
+        require(percentage <= 100 && percentage >= 10, "Max wallet - Keep 1% to 10%");
         _tokenInfo.maxPercentageForWallet = percentage;
         maxAmountForWallet =
-            ((totalSupply() * _tokenInfo.maxPercentageForWallet) / 10) /
-            100;
+            (totalSupply() * _tokenInfo.maxPercentageForWallet) /
+            1000; // The extra 0 will help with working with ratio of percentages
+        emit MaxTokensForWalletUpdated(maxAmountForWallet);
     }
 
-    function setMaxAmountForTxn(uint8 percentage) public onlyOwner {
+    // Percentage of tokens transfer allowed in one txn max = 100, min = 0.1 
+    function setMaxAmountForTxn(uint8 percentage) external onlyOwner {
+        require(percentage <= 1000 && percentage >= 1, "Max txn - Keep 0.1% to 100%");
         _tokenInfo.maxPercentageForTx = percentage;
         maxAmountForTx =
-            ((totalSupply() * _tokenInfo.maxPercentageForTx) / 10) /
-            100;
+            (totalSupply() * _tokenInfo.maxPercentageForTx) /
+            1000; // The extra 0 will help with working with ratio of percentages
+        emit MaxTokensForTransactionUpdated(maxAmountForTx);
     }
 
-    function setTokenAmountToBeginSwap(uint8 percentage) public onlyOwner {
+    // Percentage of tokens accumulated in fees to begin swap max = 10, min = 0.1 
+    function setTokenAmountToBeginSwap(uint8 percentage)
+        external
+        onlyOwner
+    {
+        require(percentage <= 100 && percentage >= 1, "Token for swap - Keep 0.1% to 10%");
         _tokenInfo.feesToSwapPercentage = percentage;
         numTokensSellToAddToLiquidity =
-            ((totalSupply() * _tokenInfo.feesToSwapPercentage) / 10) /
-            100;
+            (totalSupply() * _tokenInfo.feesToSwapPercentage) /
+            1000; // The extra 0 will help with working with ratio of percentages
+        emit TokensToBeginSwapUpdated(numTokensSellToAddToLiquidity);
     }
 
     receive() external payable {}
